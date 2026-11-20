@@ -1,0 +1,19 @@
+name: signal-check
+services:
+  api:
+    image: ${IMAGE_REF:?Set IMAGE_REF in .env or the shell}
+    environment:
+      SERVICE_PORT: ${SERVICE_PORT:-8080}
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8216}:${SERVICE_PORT:-8080}"
+    read_only: true
+    cap_drop: [ALL]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, socket; socket.create_connection(('127.0.0.1', int(os.environ['SERVICE_PORT'])), 2).close()"
+      interval: 2s
+      timeout: 3s
+      retries: 6
