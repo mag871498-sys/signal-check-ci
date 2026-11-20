@@ -1,0 +1,135 @@
+name: Signal Check pipeline
+run-name: ${{ github.event_name }} · ${{ github.head_ref || github.ref_name }}
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, codex/qa-negative, codex/health-negative]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: API tests and Docker build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: API tests
+        run: |
+          mkdir -p evidence
+          python -m pip install -r requirements-dev.txt 2>&1 | tee evidence/install.log
+          python -m pytest -q tests --junitxml=evidence/api.xml 2>&1 | tee evidence/api.log
+      - name: Build image labeled by commit
+        run: |
+          docker build --build-arg "APP_VERSION=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "signal-check:$GITHUB_SHA" . 2>&1 | tee evidence/build.log
+      - name: Archive deployment candidate
+        if: github.event_name == 'push'
+        run: docker save "signal-check:$GITHUB_SHA" | gzip -1 > image.tar.gz
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: build-evidence
+          path: evidence/
+          retention-days: 7
+      - uses: actions/upload-artifact@v6
+        if: success() && github.event_name == 'push'
+        with:
+          name: candidate-image
+          path: image.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy and verify on Linux
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: signal-check-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Prepare Testinfra
+        run: |
+          mkdir -p evidence
+          python -m pip install -r requirements-dev.txt 2>&1 | tee evidence/install.log
+      - uses: actions/download-artifact@v7
+        with:
+          name: candidate-image
+      - name: Load images
+        id: images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker load -i image.tar.gz 2>&1 | tee evidence/candidate-load.log
+          prior="$(gh run list -R "$GITHUB_REPOSITORY" --workflow pipeline.yml \
+            --branch main --event push --status success --limit 1 \
+            --json databaseId,headSha --jq '.[] | [.databaseId, .headSha] | @tsv')"
+          previous_sha=""
+          if [[ -n "$prior" ]]; then
+            read -r previous_run last_sha <<< "$prior"
+            available="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run/artifacts?name=approved-image" \
+              --jq 'any(.artifacts[]; .expired == false)')"
+            if [[ "$available" == 'true' ]]; then
+              gh run download "$previous_run" -R "$GITHUB_REPOSITORY" \
+                -n approved-image -D baseline 2>&1 | tee evidence/baseline-download.log
+              docker load -i baseline/image.tar.gz 2>&1 | tee evidence/baseline-load.log
+              docker image inspect "signal-check:$last_sha" > /dev/null
+              previous_sha="$last_sha"
+            fi
+          fi
+          if [[ -z "$previous_sha" && "$GITHUB_REF_NAME" == "codex/health-negative" ]]; then
+            echo 'Run a successful deployment on main before the rollback experiment'
+            exit 1
+          fi
+          echo "previous_sha=$previous_sha" >> "$GITHUB_OUTPUT"
+      - name: Deploy, check and roll back if necessary
+        env:
+          PREVIOUS_SHA: ${{ steps.images.outputs.previous_sha }}
+        run: bash ops/deploy.sh "$GITHUB_SHA" "$PREVIOUS_SHA" 2>&1 | tee evidence/deploy.log
+      - name: Collect final logs and remove the container
+        if: always()
+        env:
+          IMAGE_REF: signal-check:${{ github.sha }}
+        run: |
+          mkdir -p evidence
+          docker compose logs --no-color > evidence/final-container.log 2>&1 || true
+          docker compose down > evidence/cleanup.log 2>&1
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: deployment-evidence
+          path: evidence/
+          retention-days: 7
+      - uses: actions/upload-artifact@v6
+        if: success() && github.ref_name == 'main'
+        with:
+          name: approved-image
+          path: image.tar.gz
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
