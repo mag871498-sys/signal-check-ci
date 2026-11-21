@@ -28,7 +28,7 @@ def test_health_contract(api):
     try:
         conn.request("GET", "/health")
         response = conn.getresponse()
-        assert response.status == 200
+        assert response.status == 201
         assert json.load(response) == {"state": "ready"}
     finally:
         conn.close()
