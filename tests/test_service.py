@@ -66,3 +66,7 @@ def test_invalid_configuration(monkeypatch, key, value):
     monkeypatch.setenv(key, value)
     with pytest.raises(ValueError):
         Settings.from_env()
+
+def test_default_version(monkeypatch):
+    monkeypatch.delenv("APP_VERSION", raising=False)
+    assert Settings.from_env().version == "dev"
