@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, codex/qa-negative, codex/health-negative]
+    branches: [main, experiment/test-failure, experiment/health-503]
 
 permissions:
   contents: read
@@ -102,7 +102,7 @@ jobs:
               previous_sha="$last_sha"
             fi
           fi
-          if [[ -z "$previous_sha" && "$GITHUB_REF_NAME" == "codex/health-negative" ]]; then
+          if [[ -z "$previous_sha" && "$GITHUB_REF_NAME" == "experiment/health-503" ]]; then
             echo 'Run a successful deployment on main before the rollback experiment'
             exit 1
           fi
